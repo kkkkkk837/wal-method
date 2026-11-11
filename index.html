@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>Wal Method</title>
+<style>
+:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);color-scheme:dark}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;background:#000;color:#fff;font:16px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;display:flex;justify-content:center}
+main{width:100%;max-width:440px;padding:56px 20px 40px}
+h1{margin:0;font-size:32px;font-weight:800;letter-spacing:-.02em}
+p.t{margin:6px 0 36px;font-size:15px;color:#fff;opacity:.6}
+.drop{position:relative;display:block;border:1px solid #fff;padding:30px 14px;text-align:center;cursor:pointer}
+.drop input{position:absolute;inset:0;opacity:0;width:100%;cursor:pointer}
+.drop strong{display:block;font-weight:600;word-break:break-all}
+.drop span{display:block;margin-top:2px;font-size:13px;opacity:.6}
+button{display:block;width:100%;margin-top:12px;padding:15px;font:inherit;font-weight:700;border:1px solid #fff;background:#fff;color:#000;cursor:pointer}
+button:disabled{background:#000;color:#fff;opacity:.35;cursor:default}
+button.o{background:#000;color:#fff}
+#meta{margin-top:20px}
+#meta div{display:flex;justify-content:space-between;gap:16px;padding:9px 0;border-bottom:1px solid #333;font-size:14px}
+#meta div span:first-child{opacity:.55}
+#meta div span:last-child{text-align:right}
+#st{margin-top:14px;font-size:14px;opacity:.7;min-height:20px}
+#res{display:none;margin-top:28px;border-top:1px solid #fff;padding-top:20px}
+#res b{display:block;font-weight:600;word-break:break-all}
+#res span{display:block;margin:4px 0 6px;font-size:14px;opacity:.6}
+</style>
+</head>
+<body>
+<main>
+<h1>Wal Method</h1>
+<p class="t">Up to 4K quality</p>
+<label class="drop"><input type="file" id="f" accept="video/mp4,.mp4,.m4v"><strong id="dt">Choose a video</strong><span id="ds"></span></label>
+<button id="go" disabled>Start</button>
+<div id="meta"></div>
+<div id="st"></div>
+<div id="res">
+<b id="fn"></b><span id="info"></span>
+<button id="save">Save</button>
+<button class="o" id="again">Another video</button>
+</div>
+</main>
+<script>
+//CORE
+const CONT=new Set(['moov','trak','mdia','minf','stbl','edts']);
+const dec=new TextDecoder();
+function pBoxes(u8,s,e){
+ const dv=new DataView(u8.buffer,u8.byteOffset,u8.byteLength),r=[];
+ while(s+8<=e){let sz=dv.getUint32(s);const t=String.fromCharCode(u8[s+4],u8[s+5],u8[s+6],u8[s+7]);if(sz===1)throw new Error('Unsupported large MP4 box.');if(sz===0)sz=e-s;if(sz<8||s+sz>e)break;r.push({t,s,e:s+sz});s+=sz}
+ return r;
+}
+function pNode(u8,b){
+ if(CONT.has(b.t))return{t:b.t,kids:pBoxes(u8,b.s+8,b.e).map(x=>pNode(u8,x))};
+ return{t:b.t,d:u8.slice(b.s+8,b.e)};
+}
+function ser(n,out){
+ if(n.kids){const parts=[];let len=8;for(const k of n.kids){const p=ser(k);parts.push(p);len+=p.length}const o=new Uint8Array(len);const dv=new DataView(o.buffer);dv.setUint32(0,len);o.set(Array.from(n.t,c=>c.charCodeAt(0)),4);let q=8;for(const p of parts){o.set(p,q);q+=p.length}return o}
+ const o=new Uint8Array(8+n.d.length),dv=new DataView(o.buffer);dv.setUint32(0,o.length);o.set(Array.from(n.t,c=>c.charCodeAt(0)),4);o.set(n.d,8);return o;
+}
+const clone=n=>n.kids?{t:n.t,kids:n.kids.map(clone)}:{t:n.t,d:n.d.slice()};
+const kid=(n,t)=>n.kids.find(k=>k.t===t);
+const DV=n=>new DataView(n.d.buffer,n.d.byteOffset,n.d.byteLength);
+const SIL=Uint8Array.of(0x21,0x10,0x04,0x60,0x8c,0x1c);
+const NS=16;
+function u32(a,b,c,d){return[(a>>>24)&255,(a>>>16)&255,(a>>>8)&255,a&255]}
+function cat(...xs){let n=0;for(const x of xs)n+=x.length;const o=new Uint8Array(n);let q=0;for(const x of xs){o.set(x,q);q+=x.length}return o}
+const be32=v=>Uint8Array.of((v>>>24)&255,(v>>>16)&255,(v>>>8)&255,v&255);
+function varlen(u8,p){let len=0,c;do{c=u8[p++];len=len*128+(c&127)}while(c&128);return[len,p]}
+function wal(buf){
+ const u8=new Uint8Array(buf),L=u8.length;
+ if(L<32)throw new Error('This doesn’t look like a video file.');
+ const top=pBoxes(u8,0,L),mb=top.find(b=>b.t==='moov');
+ if(!mb)throw new Error('This isn’t a valid MP4 (no moov box).');
+ const moov=pNode(u8,mb),mvhd=kid(moov,'mvhd'),mv=DV(mvhd);
+ const v1m=mvhd.d[0]===1,movTS=mv.getUint32(v1m?20:12);
+ const traks=moov.kids.filter(k=>k.t==='trak');
+ const hd=t=>String.fromCharCode(...kid(kid(t,'mdia'),'hdlr').d.subarray(8,12));
+ const vt=traks.find(t=>hd(t)==='vide'),at=traks.find(t=>hd(t)==='soun');
+ if(!at)throw new Error('This video has no audio track.');
+ const ai=traks.indexOf(at);
+ const mdia=kid(at,'mdia'),mdhd=kid(mdia,'mdhd'),stbl=kid(kid(mdia,'minf'),'stbl');
+ const g=t=>kid(stbl,t);
+ // original audio config
+ const stsd=g('stsd'),sdv=DV(stsd);
+ if(sdv.getUint32(4)!==1)throw new Error('Unsupported audio layout.');
+ const ent=stsd.d.subarray(8),esz=new DataView(ent.buffer,ent.byteOffset).getUint32(0);
+ if(String.fromCharCode(...ent.subarray(4,8))!=='mp4a')throw new Error('Audio isn’t AAC.');
+ const entry=ent.slice(0,esz);
+ let esdsAt=-1,btrt=new Uint8Array(0);
+ for(let p=36;p+8<=esz;){const s=new DataView(entry.buffer).getUint32(p),t=String.fromCharCode(...entry.subarray(p+4,p+8));if(t==='esds')esdsAt=p;else if(t==='btrt')btrt=entry.slice(p,p+s);p+=s}
+ if(esdsAt<0)throw new Error('Audio config not found.');
+ let p=esdsAt+12;if(entry[p++]!==3)throw new Error('Unsupported audio config.');
+ let [,q]=varlen(entry,p);const esId=(entry[q]<<8)|entry[q+1];q+=3;
+ if(entry[q++]!==4)throw new Error('Unsupported audio config.');
+ let [,q2]=varlen(entry,q);const dcd=entry.slice(q2,q2+13);q=q2+13;
+ if(entry[q++]!==5)throw new Error('Unsupported audio config.');
+ let [al,q3]=varlen(entry,q);const asc=entry.subarray(q3,q3+al);
+ const fi=((asc[0]&7)<<1)|(asc[1]>>7),ch=(asc[1]>>3)&15;
+ if(ch!==2)throw new Error('This method needs stereo audio.');
+ // ---- modify audio track
+ const mdv=DV(mdhd),m1=mdhd.d[0]===1,medTS=mdv.getUint32(m1?20:12);
+ const oldMed=m1?Number(mdv.getBigUint64(24)):mdv.getUint32(16);
+ const newMed=oldMed+NS*1024;
+ if(m1)mdv.setBigUint64(24,BigInt(newMed));else mdv.setUint32(16,newMed);
+ const tk=kid(at,'tkhd'),tdv=DV(tk),t1=tk.d[0]===1,tdo=t1?28:20;
+ const oldT=t1?Number(tdv.getBigUint64(tdo)):tdv.getUint32(tdo),newT=Math.ceil(newMed/medTS*movTS);
+ if(t1)tdv.setBigUint64(tdo,BigInt(newT));else tdv.setUint32(tdo,newT);
+ const edts=kid(at,'edts');
+ if(edts){const el=kid(edts,'elst'),edv=DV(el),n=edv.getUint32(4),v1=el.d[0]===1;if(n>=1){if(v1){if(Number(edv.getBigUint64(8))===oldT)edv.setBigUint64(8,BigInt(newT))}else if(edv.getUint32(8)===oldT)edv.setUint32(8,newT)}}
+ // stts
+ {const d=g('stts').d,dv=DV(g('stts')),n=dv.getUint32(4);const ent=[];for(let i=0;i<n;i++)ent.push([dv.getUint32(8+8*i),dv.getUint32(12+8*i)]);
+  if(ent[ent.length-1][1]===1024)ent[ent.length-1][0]+=NS;else ent.push([NS,1024]);
+  const o=new Uint8Array(8+8*ent.length),ov=new DataView(o.buffer);ov.setUint32(4,ent.length);ent.forEach((e,i)=>{ov.setUint32(8+8*i,e[0]);ov.setUint32(12+8*i,e[1])});g('stts').d=o}
+ // stsz
+ {const n=g('stsz'),dv=DV(n);if(dv.getUint32(4)!==0)throw new Error('Unsupported audio sample table.');const cnt=dv.getUint32(8);
+  const o=new Uint8Array(12+4*(cnt+NS)),ov=new DataView(o.buffer);o.set(n.d.subarray(0,12+4*cnt));ov.setUint32(8,cnt+NS);for(let i=0;i<NS;i++)ov.setUint32(12+4*(cnt+i),SIL.length);n.d=o}
+ // chunk offsets
+ const base=L+8;
+ const c64=!!g('co64'),co=g(c64?'co64':'stco'),cdv=DV(co),nCh=cdv.getUint32(4),w=c64?8:4;
+ if(!c64&&base+48>4294967295)throw new Error('File too large for this method.');
+ {const o=new Uint8Array(8+w*(nCh+2)),ov=new DataView(o.buffer);o.set(co.d.subarray(0,8+w*nCh));ov.setUint32(4,nCh+2);
+  if(c64){ov.setBigUint64(8+8*nCh,BigInt(base));ov.setBigUint64(16+8*nCh,BigInt(base+48))}else{ov.setUint32(8+4*nCh,base);ov.setUint32(12+4*nCh,base+48)}co.d=o}
+ // stsc (second new chunk uses description 1 for now)
+ {const n=g('stsc'),dv=DV(n),c=dv.getUint32(4);const o=new Uint8Array(8+12*(c+2)),ov=new DataView(o.buffer);o.set(n.d.subarray(0,8+12*c));ov.setUint32(4,c+2);
+  const b=8+12*c;ov.setUint32(b,nCh+1);ov.setUint32(b+4,8);ov.setUint32(b+8,1);ov.setUint32(b+12,nCh+2);ov.setUint32(b+16,8);ov.setUint32(b+20,1);n.d=o}
+ // sbgp (roll groups)
+ for(const sb of stbl.kids.filter(k=>k.t==='sbgp')){const dv=DV(sb),eo=sb.d[0]===1?12:8,n=dv.getUint32(eo);if(sb.d[0]===0||sb.d[0]===1){const o=new Uint8Array(sb.d.length+8),ov=new DataView(o.buffer);o.set(sb.d);ov.setUint32(eo,n+1);ov.setUint32(sb.d.length,NS);ov.setUint32(sb.d.length+4,0);sb.d=o}}
+ // ---- second audio track (clone) with a fresh id
+ const nextId=mv.getUint32(mvhd.d.length-4);
+ const t3=clone(at);
+ {const k=kid(t3,'tkhd'),dv=DV(k);dv.setUint32(k.d[0]===1?20:12,nextId)}
+ // ---- first audio track gets the extra sample description
+ {const dscd=new Uint8Array(8);
+  const nasc=Uint8Array.of((2<<3)|(fi>>1),(fi&1)<<7,0x04|(fi>>2),(fi&3)<<6,0x40,0x00,0x20,0x00);
+  const dcdBody=cat(dcd,Uint8Array.of(5,0x80,0x80,0x80,nasc.length),nasc);
+  const esd=cat(Uint8Array.of((esId>>8)&255,esId&255,0),Uint8Array.of(4,0x80,0x80,0x80,dcdBody.length),dcdBody,Uint8Array.of(6,0x80,0x80,0x80,1,2));
+  const esdsBody=cat(be32(0),Uint8Array.of(3,0x80,0x80,0x80,esd.length),esd);
+  const esds=cat(be32(8+esdsBody.length),Uint8Array.of(0x65,0x73,0x64,0x73),esdsBody);
+  const head=entry.slice(0,36),body=cat(head,esds,btrt);new DataView(body.buffer).setUint32(0,body.length);
+  const o=cat(stsd.d.subarray(0,8),entry,body);new DataView(o.buffer).setUint32(4,2);stsd.d=o;
+  const sc=g('stsc'),sv=DV(sc),c=sv.getUint32(4);sv.setUint32(8+12*(c-1)+8,2)}
+ // third track keeps original stsd: restore from the saved original
+ {const s3=kid(kid(kid(kid(t3,'mdia'),'minf'),'stbl'),'stsd');s3.d=stsd.d.slice(0);const o=cat(Uint8Array.of(0,0,0,0),be32(1),entry);s3.d=o}
+ // ---- movie header
+ {const dur=v1m?Number(mv.getBigUint64(24)):mv.getUint32(16);if(newT>dur){if(v1m)mv.setBigUint64(24,BigInt(newT));else mv.setUint32(16,newT)}mv.setUint32(mvhd.d.length-4,nextId+1)}
+ moov.kids.splice(moov.kids.indexOf(at)+1,0,t3);
+ // ---- assemble
+ const mdat=new Uint8Array(8+NS*SIL.length);new DataView(mdat.buffer).setUint32(0,mdat.length);mdat.set([0x6d,0x64,0x61,0x74],4);for(let i=0;i<NS;i++)mdat.set(SIL,8+i*SIL.length);
+ const newMoov=ser(moov),free=Uint8Array.of(0x66,0x72,0x65,0x65);
+ const parts=[u8.subarray(0,mb.s+4),free,u8.subarray(mb.s+8,L),mdat,newMoov];
+ let info='';
+ if(vt){const tv=DV(kid(vt,'tkhd')),o=kid(vt,'tkhd').d.length;const wv=tv.getUint32(o-8)>>>16,hv=tv.getUint32(o-4)>>>16;
+  const vs=kid(kid(kid(vt,'mdia'),'minf'),'stbl'),n=DV(kid(vs,'stsz')).getUint32(8),vm=kid(kid(vt,'mdia'),'mdhd'),vd=DV(vm),v1=vm.d[0]===1,dur=(v1?Number(vd.getBigUint64(24)):vd.getUint32(16))/vd.getUint32(v1?20:12);
+  info=wv+'×'+hv+', ~'+(n/dur).toFixed(2)+' fps';}
+ return{parts,info};
+}
+
+function probe(buf){
+ const u8=new Uint8Array(buf),mb=pBoxes(u8,0,u8.length).find(b=>b.t==='moov');
+ if(!mb)throw new Error('This isn’t an MP4 file.');
+ const moov=pNode(u8,mb),traks=moov.kids.filter(k=>k.t==='trak');
+ const hd=t=>String.fromCharCode(...kid(kid(t,'mdia'),'hdlr').d.subarray(8,12));
+ const vt=traks.find(t=>hd(t)==='vide'),at=traks.find(t=>hd(t)==='soun');
+ if(!vt)throw new Error('No video track found.');
+ const st=t=>kid(kid(kid(t,'mdia'),'minf'),'stbl'),four=(d,o)=>String.fromCharCode(d[o],d[o+1],d[o+2],d[o+3]);
+ const M={avc1:'H.264',avc3:'H.264',hvc1:'H.265 (HEVC)',hev1:'H.265 (HEVC)',vp09:'VP9',av01:'AV1',mp4v:'MPEG-4',mp4a:'AAC',Opus:'Opus','ac-3':'AC-3','ec-3':'E-AC-3',alac:'ALAC'};
+ const sd=kid(st(vt),'stsd').d,vtype=four(sd,12);
+ const tk=kid(vt,'tkhd'),tdv=DV(tk),o=tk.d.length,w=tdv.getUint32(o-8)>>>16,h=tdv.getUint32(o-4)>>>16;
+ const md=kid(kid(vt,'mdia'),'mdhd'),mdv=DV(md),m1=md.d[0]===1,ts=mdv.getUint32(m1?20:12),dur=(m1?Number(mdv.getBigUint64(24)):mdv.getUint32(16))/ts;
+ const sz=kid(st(vt),'stsz'),sv=DV(sz),n=sv.getUint32(8);let bytes=0;if(sv.getUint32(4))bytes=sv.getUint32(4)*n;else for(let i=0;i<n;i++)bytes+=sv.getUint32(12+4*i);
+ const side=Math.min(w,h),q=side>=2160?'4K':side+'p';
+ const mm=Math.floor(dur/60),ss=Math.round(dur%60);
+ const r={codec:M[vtype]||vtype,quality:q+' ('+w+'×'+h+')',fps:(n/dur).toFixed(2).replace(/\.?0+$/,'')+' fps',duration:mm+':'+String(ss).padStart(2,'0')+' ('+dur.toFixed(1)+' s)',bitrate:(bytes*8/dur/1e6).toFixed(1)+' Mbps'};
+ if(at){const asd=kid(st(at),'stsd').d,av=new DataView(asd.buffer,asd.byteOffset,asd.byteLength),at4=four(asd,12);r.audio=(M[at4]||at4)+', '+(av.getUint16(32)===2?'stereo':av.getUint16(32)+' ch')+', '+Math.round(av.getUint32(40)/65536)+' Hz'}else r.audio='none';
+ return r;
+}
+//ENDCORE
+const $=id=>document.getElementById(id);
+let out=null,name='video.mp4',file=null;
+const setName=()=>{name=(file.name.replace(/\.[^.]+$/,'')||'video')+'_wal.mp4'};
+let cache=null;
+const rows=[['Codec','codec'],['Quality','quality'],['FPS','fps'],['Duration','duration'],['Bitrate','bitrate'],['Audio','audio']];
+$('f').onchange=async()=>{
+ file=$('f').files[0]||null;cache=null;$('go').disabled=!file;$('res').style.display='none';$('st').textContent='';$('meta').innerHTML='';
+ if(!file)return;
+ $('dt').textContent=file.name;$('ds').textContent=(file.size/1048576).toFixed(1)+' MB';setName();
+ try{
+  cache=await file.arrayBuffer();const m=probe(cache);
+  $('meta').innerHTML=rows.map(r=>'<div><span>'+r[0]+'</span><span>'+m[r[1]]+'</span></div>').join('');
+ }catch(e){$('st').textContent='Error: '+(e.message||e)}
+};
+$('go').onclick=async()=>{
+ if(!file)return;
+ $('go').disabled=true;$('res').style.display='none';$('st').textContent='Working…';
+ try{
+  const buf=cache||await file.arrayBuffer();
+  await new Promise(r=>setTimeout(r,50));
+  const r=wal(buf);
+  out=new Blob(r.parts,{type:'video/mp4'});
+  setName();$('fn').textContent=name;$('info').textContent=(out.size/1048576).toFixed(1)+' MB';
+  $('res').style.display='block';$('st').textContent='';
+ }catch(e){$('st').textContent='Error: '+(e.message||e)}
+ $('go').disabled=false;
+};
+$('again').onclick=()=>{$('res').style.display='none';$('f').value='';file=null;$('dt').textContent='Choose a video';$('ds').textContent='';$('go').disabled=true;$('st').textContent='';$('meta').innerHTML='';cache=null};
+const anchorSave=()=>{const u=URL.createObjectURL(out),a=document.createElement('a');a.href=u;a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(u),60000)};
+$('save').onclick=async()=>{
+ if(!out)return;let why='';
+ try{const d=window.claude&&await window.claude.use('downloads');if(d){await d.save({filename:name,data:out});$('st').textContent='Saved: '+name;return}why='downloads unavailable'}catch(e){if(e&&e.code==='declined'){$('st').textContent='Cancelled.';return}why=(e&&(e.code||e.message))||'error'}
+ try{anchorSave();$('st').textContent='Download started: '+name+'. If nothing happened, open this page in your phone’s browser.';return}catch(e){why+=' / '+((e&&e.message)||'failed')}
+ try{const f=new File([out],name,{type:'video/mp4'});if(navigator.canShare&&navigator.canShare({files:[f]})){await navigator.share({files:[f]});return}}catch(e){}
+ $('st').textContent='Couldn’t save ('+why+').';
+};
+</script>
+</body>
+</html>
