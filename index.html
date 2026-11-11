@@ -34,7 +34,7 @@ button.o{background:#000;color:#fff}
 <main>
 <h1>Wal Method</h1>
 <p class="t">Up to 4K quality</p>
-<label class="drop"><input type="file" id="f" accept="video/mp4,.mp4,.m4v"><strong id="dt">Choose a video</strong><span id="ds"></span></label>
+<label class="drop"><input type="file" id="f" accept="video/mp4,video/quicktime,.mp4,.m4v,.mov"><strong id="dt">Choose a video</strong><span id="ds"></span></label>
 <button id="go" disabled>Start</button>
 <div id="meta"></div>
 <div id="st"></div>
@@ -66,101 +66,105 @@ function ser(n,out){
 const clone=n=>n.kids?{t:n.t,kids:n.kids.map(clone)}:{t:n.t,d:n.d.slice()};
 const kid=(n,t)=>n.kids.find(k=>k.t===t);
 const DV=n=>new DataView(n.d.buffer,n.d.byteOffset,n.d.byteLength);
-const SIL=Uint8Array.of(0x21,0x10,0x04,0x60,0x8c,0x1c);
+const SIL2=Uint8Array.of(0x21,0x10,0x04,0x60,0x8c,0x1c),SIL1=Uint8Array.of(0x01,0x18,0x20,0x07);
 const NS=16;
-function u32(a,b,c,d){return[(a>>>24)&255,(a>>>16)&255,(a>>>8)&255,a&255]}
 function cat(...xs){let n=0;for(const x of xs)n+=x.length;const o=new Uint8Array(n);let q=0;for(const x of xs){o.set(x,q);q+=x.length}return o}
 const be32=v=>Uint8Array.of((v>>>24)&255,(v>>>16)&255,(v>>>8)&255,v&255);
 function varlen(u8,p){let len=0,c;do{c=u8[p++];len=len*128+(c&127)}while(c&128);return[len,p]}
+const L_=(t,d)=>({t,d}),C_=(t,...k)=>({t,kids:k});
+const bytes=(...x)=>Uint8Array.from(x.flat());
+function mkEsds(esId,dcd,asc){
+ const dcdBody=cat(dcd,Uint8Array.of(5,0x80,0x80,0x80,asc.length),asc);
+ const esd=cat(Uint8Array.of((esId>>8)&255,esId&255,0),Uint8Array.of(4,0x80,0x80,0x80,dcdBody.length),dcdBody,Uint8Array.of(6,0x80,0x80,0x80,1,2));
+ const body=cat(be32(0),Uint8Array.of(3,0x80,0x80,0x80,esd.length),esd);
+ return cat(be32(8+body.length),Uint8Array.of(0x65,0x73,0x64,0x73),body);
+}
+function synthTrack(N,movTS,tid,base0){
+ const sr=44100,tdur=Math.ceil(N*1024/sr*movTS),mk=(n,f)=>{const o=new Uint8Array(n);f(new DataView(o.buffer));return o};
+ const tkhd=mk(84,v=>{v.setUint32(0,3);v.setUint32(12,tid);v.setUint32(20,tdur);v.setUint16(34,1);v.setUint16(36,0x100);[0x10000,0,0,0,0x10000,0,0,0,0x40000000].forEach((x,i)=>v.setUint32(40+4*i,x))});
+ const mdhd=mk(24,v=>{v.setUint32(12,sr);v.setUint32(16,N*1024);v.setUint16(20,0x55c4)});
+ const hdlr=cat(be32(0),be32(0),bytes(0x73,0x6f,0x75,0x6e),new Uint8Array(12),new TextEncoder().encode('SoundHandler\0'));
+ const esds=mkEsds(tid,bytes(0x40,0x15,0,0,0,0,1,0xf3,0xff,0,1,0xf3,0xff),bytes(0x12,0x10));
+ const ent=cat(be32(36+esds.length),bytes(0x6d,0x70,0x34,0x61),new Uint8Array(6),bytes(0,1),new Uint8Array(8),bytes(0,2,0,16,0,0,0,0),be32(sr*65536),esds);
+ const stsd=cat(be32(0),be32(1),ent),stts=cat(be32(0),be32(1),be32(N),be32(1024)),stsc=cat(be32(0),be32(1),be32(1),be32(N),be32(1));
+ const stsz=new Uint8Array(12+4*N);new DataView(stsz.buffer).setUint32(8,N);for(let i=0;i<N;i++)new DataView(stsz.buffer).setUint32(12+4*i,SIL2.length);
+ const stco=cat(be32(0),be32(1),be32(base0));
+ return C_('trak',L_('tkhd',tkhd),C_('edts',L_('elst',cat(be32(0),be32(1),be32(tdur),be32(0),be32(0x10000)))),
+  C_('mdia',L_('mdhd',mdhd),L_('hdlr',hdlr),C_('minf',L_('smhd',new Uint8Array(8)),C_('dinf',L_('dref',cat(be32(0),be32(1),be32(12),bytes(0x75,0x72,0x6c,0x20),be32(1)))),
+   C_('stbl',L_('stsd',stsd),L_('stts',stts),L_('stsc',stsc),L_('stsz',stsz),L_('stco',stco)))));
+}
 function wal(buf){
  const u8=new Uint8Array(buf),L=u8.length;
  if(L<32)throw new Error('This doesn’t look like a video file.');
  const top=pBoxes(u8,0,L),mb=top.find(b=>b.t==='moov');
- if(!mb)throw new Error('This isn’t a valid MP4 (no moov box).');
+ if(!mb)throw new Error('Only MP4 and MOV files are supported.');
  const moov=pNode(u8,mb),mvhd=kid(moov,'mvhd'),mv=DV(mvhd);
- const v1m=mvhd.d[0]===1,movTS=mv.getUint32(v1m?20:12);
- const traks=moov.kids.filter(k=>k.t==='trak');
+ const v1m=mvhd.d[0]===1,movTS=mv.getUint32(v1m?20:12),movDur=v1m?Number(mv.getBigUint64(24)):mv.getUint32(16);
  const hd=t=>String.fromCharCode(...kid(kid(t,'mdia'),'hdlr').d.subarray(8,12));
- const vt=traks.find(t=>hd(t)==='vide'),at=traks.find(t=>hd(t)==='soun');
- if(!at)throw new Error('This video has no audio track.');
- const ai=traks.indexOf(at);
- const mdia=kid(at,'mdia'),mdhd=kid(mdia,'mdhd'),stbl=kid(kid(mdia,'minf'),'stbl');
- const g=t=>kid(stbl,t);
- // original audio config
- const stsd=g('stsd'),sdv=DV(stsd);
- if(sdv.getUint32(4)!==1)throw new Error('Unsupported audio layout.');
- const ent=stsd.d.subarray(8),esz=new DataView(ent.buffer,ent.byteOffset).getUint32(0);
- if(String.fromCharCode(...ent.subarray(4,8))!=='mp4a')throw new Error('Audio isn’t AAC.');
- const entry=ent.slice(0,esz);
- let esdsAt=-1,btrt=new Uint8Array(0);
- for(let p=36;p+8<=esz;){const s=new DataView(entry.buffer).getUint32(p),t=String.fromCharCode(...entry.subarray(p+4,p+8));if(t==='esds')esdsAt=p;else if(t==='btrt')btrt=entry.slice(p,p+s);p+=s}
+ const vt=moov.kids.filter(k=>k.t==='trak').find(t=>hd(t)==='vide');
+ if(!vt)throw new Error('No video track found.');
+ let at=moov.kids.filter(k=>k.t==='trak').find(t=>hd(t)==='soun'),nextId=mv.getUint32(mvhd.d.length-4),synN=0,sil=SIL2,base=L+8;
+ if(!at){ // no audio: build a silent stereo AAC track covering the whole video
+  synN=Math.max(1,Math.ceil(movDur/movTS*44100/1024));
+  at=synthTrack(synN,movTS,nextId,L+8);nextId++;
+  moov.kids.splice(moov.kids.map(k=>k.t).lastIndexOf('trak')+1,0,at);base=L+8+synN*SIL2.length;
+ }
+ const mdia=kid(at,'mdia'),mdhd=kid(mdia,'mdhd'),stbl=kid(kid(mdia,'minf'),'stbl'),g=t=>kid(stbl,t);
+ const stsd=g('stsd');
+ if(DV(stsd).getUint32(4)!==1)throw new Error('Unsupported audio layout.');
+ const ent=stsd.d.subarray(8),esz=new DataView(ent.buffer,ent.byteOffset).getUint32(0),at4=String.fromCharCode(...ent.subarray(4,8));
+ if(at4!=='mp4a')throw new Error('Audio format ('+at4+') isn’t supported. It needs AAC.');
+ const entry=ent.slice(0,esz);let esdsAt=-1;
+ for(let i=4;i+4<esz;i++)if(entry[i]===0x65&&entry[i+1]===0x73&&entry[i+2]===0x64&&entry[i+3]===0x73){esdsAt=i-4;break}
  if(esdsAt<0)throw new Error('Audio config not found.');
+ let btrt=new Uint8Array(0);for(let i=4;i+4<esz;i++)if(entry[i]===0x62&&entry[i+1]===0x74&&entry[i+2]===0x72&&entry[i+3]===0x74){const sz=new DataView(entry.buffer).getUint32(i-4);btrt=entry.slice(i-4,i-4+sz);break}
  let p=esdsAt+12;if(entry[p++]!==3)throw new Error('Unsupported audio config.');
  let [,q]=varlen(entry,p);const esId=(entry[q]<<8)|entry[q+1];q+=3;
  if(entry[q++]!==4)throw new Error('Unsupported audio config.');
- let [,q2]=varlen(entry,q);const dcd=entry.slice(q2,q2+13);q=q2+13;
+ let [,q2]=varlen(entry,q);if(entry[q2]!==0x40)throw new Error('Audio format isn’t supported. It needs AAC.');const dcd=entry.slice(q2,q2+13);q=q2+13;
  if(entry[q++]!==5)throw new Error('Unsupported audio config.');
  let [al,q3]=varlen(entry,q);const asc=entry.subarray(q3,q3+al);
- const fi=((asc[0]&7)<<1)|(asc[1]>>7),ch=(asc[1]>>3)&15;
- if(ch!==2)throw new Error('This method needs stereo audio.');
- // ---- modify audio track
+ const aot=asc[0]>>3,fi=((asc[0]&7)<<1)|(asc[1]>>7),ch=(asc[1]>>3)&15;
+ if(aot!==2)throw new Error('Only AAC-LC audio is supported.');
+ if(ch===1)sil=SIL1;else if(ch!==2)throw new Error('Audio must be stereo or mono.');
+ const SL=sil.length;
  const mdv=DV(mdhd),m1=mdhd.d[0]===1,medTS=mdv.getUint32(m1?20:12);
- const oldMed=m1?Number(mdv.getBigUint64(24)):mdv.getUint32(16);
- const newMed=oldMed+NS*1024;
+ const oldMed=m1?Number(mdv.getBigUint64(24)):mdv.getUint32(16),newMed=oldMed+NS*1024;
  if(m1)mdv.setBigUint64(24,BigInt(newMed));else mdv.setUint32(16,newMed);
  const tk=kid(at,'tkhd'),tdv=DV(tk),t1=tk.d[0]===1,tdo=t1?28:20;
  const oldT=t1?Number(tdv.getBigUint64(tdo)):tdv.getUint32(tdo),newT=Math.ceil(newMed/medTS*movTS);
  if(t1)tdv.setBigUint64(tdo,BigInt(newT));else tdv.setUint32(tdo,newT);
  const edts=kid(at,'edts');
  if(edts){const el=kid(edts,'elst'),edv=DV(el),n=edv.getUint32(4),v1=el.d[0]===1;if(n>=1){if(v1){if(Number(edv.getBigUint64(8))===oldT)edv.setBigUint64(8,BigInt(newT))}else if(edv.getUint32(8)===oldT)edv.setUint32(8,newT)}}
- // stts
- {const d=g('stts').d,dv=DV(g('stts')),n=dv.getUint32(4);const ent=[];for(let i=0;i<n;i++)ent.push([dv.getUint32(8+8*i),dv.getUint32(12+8*i)]);
-  if(ent[ent.length-1][1]===1024)ent[ent.length-1][0]+=NS;else ent.push([NS,1024]);
-  const o=new Uint8Array(8+8*ent.length),ov=new DataView(o.buffer);ov.setUint32(4,ent.length);ent.forEach((e,i)=>{ov.setUint32(8+8*i,e[0]);ov.setUint32(12+8*i,e[1])});g('stts').d=o}
- // stsz
+ {const dv=DV(g('stts')),n=dv.getUint32(4);const e=[];for(let i=0;i<n;i++)e.push([dv.getUint32(8+8*i),dv.getUint32(12+8*i)]);
+  if(e[e.length-1][1]===1024)e[e.length-1][0]+=NS;else e.push([NS,1024]);
+  const o=new Uint8Array(8+8*e.length),ov=new DataView(o.buffer);ov.setUint32(4,e.length);e.forEach((x,i)=>{ov.setUint32(8+8*i,x[0]);ov.setUint32(12+8*i,x[1])});g('stts').d=o}
  {const n=g('stsz'),dv=DV(n);if(dv.getUint32(4)!==0)throw new Error('Unsupported audio sample table.');const cnt=dv.getUint32(8);
-  const o=new Uint8Array(12+4*(cnt+NS)),ov=new DataView(o.buffer);o.set(n.d.subarray(0,12+4*cnt));ov.setUint32(8,cnt+NS);for(let i=0;i<NS;i++)ov.setUint32(12+4*(cnt+i),SIL.length);n.d=o}
- // chunk offsets
- const base=L+8;
- const c64=!!g('co64'),co=g(c64?'co64':'stco'),cdv=DV(co),nCh=cdv.getUint32(4),w=c64?8:4;
- if(!c64&&base+48>4294967295)throw new Error('File too large for this method.');
+  const o=new Uint8Array(12+4*(cnt+NS)),ov=new DataView(o.buffer);o.set(n.d.subarray(0,12+4*cnt));ov.setUint32(8,cnt+NS);for(let i=0;i<NS;i++)ov.setUint32(12+4*(cnt+i),SL);n.d=o}
+ const c64=!!g('co64'),co=g(c64?'co64':'stco'),nCh=DV(co).getUint32(4),w=c64?8:4;
+ if(!c64&&base+NS*SL>4294967295)throw new Error('File too large for this method.');
  {const o=new Uint8Array(8+w*(nCh+2)),ov=new DataView(o.buffer);o.set(co.d.subarray(0,8+w*nCh));ov.setUint32(4,nCh+2);
-  if(c64){ov.setBigUint64(8+8*nCh,BigInt(base));ov.setBigUint64(16+8*nCh,BigInt(base+48))}else{ov.setUint32(8+4*nCh,base);ov.setUint32(12+4*nCh,base+48)}co.d=o}
- // stsc (second new chunk uses description 1 for now)
+  if(c64){ov.setBigUint64(8+8*nCh,BigInt(base));ov.setBigUint64(16+8*nCh,BigInt(base+8*SL))}else{ov.setUint32(8+4*nCh,base);ov.setUint32(12+4*nCh,base+8*SL)}co.d=o}
  {const n=g('stsc'),dv=DV(n),c=dv.getUint32(4);const o=new Uint8Array(8+12*(c+2)),ov=new DataView(o.buffer);o.set(n.d.subarray(0,8+12*c));ov.setUint32(4,c+2);
   const b=8+12*c;ov.setUint32(b,nCh+1);ov.setUint32(b+4,8);ov.setUint32(b+8,1);ov.setUint32(b+12,nCh+2);ov.setUint32(b+16,8);ov.setUint32(b+20,1);n.d=o}
- // sbgp (roll groups)
- for(const sb of stbl.kids.filter(k=>k.t==='sbgp')){const dv=DV(sb),eo=sb.d[0]===1?12:8,n=dv.getUint32(eo);if(sb.d[0]===0||sb.d[0]===1){const o=new Uint8Array(sb.d.length+8),ov=new DataView(o.buffer);o.set(sb.d);ov.setUint32(eo,n+1);ov.setUint32(sb.d.length,NS);ov.setUint32(sb.d.length+4,0);sb.d=o}}
- // ---- second audio track (clone) with a fresh id
- const nextId=mv.getUint32(mvhd.d.length-4);
+ for(const sb of stbl.kids.filter(k=>k.t==='sbgp')){const dv=DV(sb),eo=sb.d[0]===1?12:8,n=dv.getUint32(eo);if(sb.d[0]<2){const o=new Uint8Array(sb.d.length+8),ov=new DataView(o.buffer);o.set(sb.d);ov.setUint32(eo,n+1);ov.setUint32(sb.d.length,NS);ov.setUint32(sb.d.length+4,0);sb.d=o}}
  const t3=clone(at);
  {const k=kid(t3,'tkhd'),dv=DV(k);dv.setUint32(k.d[0]===1?20:12,nextId)}
- // ---- first audio track gets the extra sample description
- {const dscd=new Uint8Array(8);
-  const nasc=Uint8Array.of((2<<3)|(fi>>1),(fi&1)<<7,0x04|(fi>>2),(fi&3)<<6,0x40,0x00,0x20,0x00);
-  const dcdBody=cat(dcd,Uint8Array.of(5,0x80,0x80,0x80,nasc.length),nasc);
-  const esd=cat(Uint8Array.of((esId>>8)&255,esId&255,0),Uint8Array.of(4,0x80,0x80,0x80,dcdBody.length),dcdBody,Uint8Array.of(6,0x80,0x80,0x80,1,2));
-  const esdsBody=cat(be32(0),Uint8Array.of(3,0x80,0x80,0x80,esd.length),esd);
-  const esds=cat(be32(8+esdsBody.length),Uint8Array.of(0x65,0x73,0x64,0x73),esdsBody);
-  const head=entry.slice(0,36),body=cat(head,esds,btrt);new DataView(body.buffer).setUint32(0,body.length);
+ {const nasc=Uint8Array.of((2<<3)|(fi>>1),(fi&1)<<7,0x04|(fi>>2),(fi&3)<<6,0x40,0x00,ch===1?0x00:0x20,0x00);
+  const esds=mkEsds(esId,dcd,nasc),head=entry.slice(0,36);head[16]=0;head[17]=0;
+  const body=cat(head,esds,btrt);new DataView(body.buffer).setUint32(0,body.length);
   const o=cat(stsd.d.subarray(0,8),entry,body);new DataView(o.buffer).setUint32(4,2);stsd.d=o;
   const sc=g('stsc'),sv=DV(sc),c=sv.getUint32(4);sv.setUint32(8+12*(c-1)+8,2)}
- // third track keeps original stsd: restore from the saved original
- {const s3=kid(kid(kid(kid(t3,'mdia'),'minf'),'stbl'),'stsd');s3.d=stsd.d.slice(0);const o=cat(Uint8Array.of(0,0,0,0),be32(1),entry);s3.d=o}
- // ---- movie header
- {const dur=v1m?Number(mv.getBigUint64(24)):mv.getUint32(16);if(newT>dur){if(v1m)mv.setBigUint64(24,BigInt(newT));else mv.setUint32(16,newT)}mv.setUint32(mvhd.d.length-4,nextId+1)}
+ {const s3=kid(kid(kid(kid(t3,'mdia'),'minf'),'stbl'),'stsd');s3.d=cat(Uint8Array.of(0,0,0,0),be32(1),entry)}
+ {if(newT>movDur){if(v1m)mv.setBigUint64(24,BigInt(newT));else mv.setUint32(16,newT)}mv.setUint32(mvhd.d.length-4,nextId+1)}
  moov.kids.splice(moov.kids.indexOf(at)+1,0,t3);
- // ---- assemble
- const mdat=new Uint8Array(8+NS*SIL.length);new DataView(mdat.buffer).setUint32(0,mdat.length);mdat.set([0x6d,0x64,0x61,0x74],4);for(let i=0;i<NS;i++)mdat.set(SIL,8+i*SIL.length);
+ const mdat=new Uint8Array(8+(synN+NS)*SL);new DataView(mdat.buffer).setUint32(0,mdat.length);mdat.set([0x6d,0x64,0x61,0x74],4);
+ for(let i=0;i<synN;i++)mdat.set(SIL2,8+i*SIL2.length);for(let i=0;i<NS;i++)mdat.set(sil,8+synN*SIL2.length+i*SL);
  const newMoov=ser(moov),free=Uint8Array.of(0x66,0x72,0x65,0x65);
  const parts=[u8.subarray(0,mb.s+4),free,u8.subarray(mb.s+8,L),mdat,newMoov];
- let info='';
- if(vt){const tv=DV(kid(vt,'tkhd')),o=kid(vt,'tkhd').d.length;const wv=tv.getUint32(o-8)>>>16,hv=tv.getUint32(o-4)>>>16;
-  const vs=kid(kid(kid(vt,'mdia'),'minf'),'stbl'),n=DV(kid(vs,'stsz')).getUint32(8),vm=kid(kid(vt,'mdia'),'mdhd'),vd=DV(vm),v1=vm.d[0]===1,dur=(v1?Number(vd.getBigUint64(24)):vd.getUint32(16))/vd.getUint32(v1?20:12);
-  info=wv+'×'+hv+', ~'+(n/dur).toFixed(2)+' fps';}
- return{parts,info};
+ const pr=probe(buf);
+ return{parts,info:pr.quality+', '+pr.fps};
 }
-
 function probe(buf){
  const u8=new Uint8Array(buf),mb=pBoxes(u8,0,u8.length).find(b=>b.t==='moov');
  if(!mb)throw new Error('This isn’t an MP4 file.');
