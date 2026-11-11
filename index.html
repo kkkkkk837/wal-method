@@ -50,12 +50,14 @@ const CONT=new Set(['moov','trak','mdia','minf','stbl','edts']);
 const dec=new TextDecoder();
 function pBoxes(u8,s,e){
  const dv=new DataView(u8.buffer,u8.byteOffset,u8.byteLength),r=[];
- while(s+8<=e){let sz=dv.getUint32(s);const t=String.fromCharCode(u8[s+4],u8[s+5],u8[s+6],u8[s+7]);if(sz===1)throw new Error('Unsupported large MP4 box.');if(sz===0)sz=e-s;if(sz<8||s+sz>e)break;r.push({t,s,e:s+sz});s+=sz}
+ while(s+8<=e){let sz=dv.getUint32(s),h=8;const t=String.fromCharCode(u8[s+4],u8[s+5],u8[s+6],u8[s+7]);
+  if(sz===1){if(s+16>e)break;sz=dv.getUint32(s+8)*4294967296+dv.getUint32(s+12);h=16}else if(sz===0)sz=e-s;
+  if(sz<h||s+sz>e)break;r.push({t,s,e:s+sz,h});s+=sz}
  return r;
 }
 function pNode(u8,b){
- if(CONT.has(b.t))return{t:b.t,kids:pBoxes(u8,b.s+8,b.e).map(x=>pNode(u8,x))};
- return{t:b.t,d:u8.slice(b.s+8,b.e)};
+ if(CONT.has(b.t))return{t:b.t,kids:pBoxes(u8,b.s+b.h,b.e).map(x=>pNode(u8,x))};
+ return{t:b.t,d:u8.slice(b.s+b.h,b.e)};
 }
 function ser(n,out){
  if(n.kids){const parts=[];let len=8;for(const k of n.kids){const p=ser(k);parts.push(p);len+=p.length}const o=new Uint8Array(len);const dv=new DataView(o.buffer);dv.setUint32(0,len);o.set(Array.from(n.t,c=>c.charCodeAt(0)),4);let q=8;for(const p of parts){o.set(p,q);q+=p.length}return o}
